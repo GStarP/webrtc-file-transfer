@@ -10,6 +10,9 @@ import {
   sendOffer,
 } from "./signaling";
 
+/**
+ * WebRTC DataChannel connecting flow
+ */
 export function startFileTransferAsProducer(
   onPin: (pin: number) => void,
   onReady: onFileTransferReadyCb
@@ -81,10 +84,37 @@ export function startFileTransferAsConsumer(
   });
 }
 
-export interface FileMeta {
+/**
+ * Type
+ */
+
+export enum FileTransferMsgType {
+  META,
+  PROGRESS,
+}
+export interface FileTransferMsg<T> {
+  type: FileTransferMsgType;
+  data: T;
+}
+export interface FileTransferMeta {
   name: string;
   size: number;
 }
+
+export interface FileTransferProgress {
+  receivedSize: number;
+  rate: number;
+}
+export type onFileTransferProgressCb = (progress: FileTransferProgress) => void;
+
+export enum FileTransferState {
+  OPEN,
+  CLOSED,
+}
+
+/**
+ * Class
+ */
 
 export class FileTramsferInfo {
   name: string;
@@ -92,8 +122,10 @@ export class FileTramsferInfo {
   receivedSize: number = 0;
 
   private _buffer: ArrayBuffer[];
+  private _lastRecvTime: number = Date.now();
+  private _lastRecvSize: number = 0;
 
-  constructor(meta: FileMeta) {
+  constructor(meta: FileTransferMeta) {
     this.name = meta.name;
     this.size = meta.size;
     this._buffer = [];
@@ -102,25 +134,49 @@ export class FileTramsferInfo {
   appendData(data: ArrayBuffer) {
     this._buffer.push(data);
     this.receivedSize += data.byteLength;
+
+    // if full data received, return file blob
     if (this.receivedSize === this.size) {
       return new Blob(this._buffer);
     }
   }
+
+  updateRate(): FileTransferProgress | undefined {
+    const now = Date.now();
+    const timeDiff = now - this._lastRecvTime;
+    // @FIX avoid too frequent update
+    if (timeDiff > 200 || this.receivedSize === this.size) {
+      const progress = {
+        receivedSize: this.receivedSize,
+        rate: ((this.receivedSize - this._lastRecvSize) / timeDiff) * 1000,
+      };
+      this._lastRecvSize = this.receivedSize;
+      this._lastRecvTime = now;
+      return progress;
+    }
+  }
 }
 
-export enum FileTransferState {
-  OPEN,
-  CLOSED,
-}
 export class FileTransfer {
   state = FileTransferState.OPEN;
 
-  _dc: RTCDataChannel;
-  _sendInfo: FileTramsferInfo | null = null;
-  _recvInfo: FileTramsferInfo | null = null;
+  sendInfo: FileTramsferInfo | null = null;
+  recvInfo: FileTramsferInfo | null = null;
+
+  private _dc: RTCDataChannel;
+  // at most 2MB data in buffer
+  private _sendBufferLimit: number = 2 * 1024 * 1024;
+  private _sendBufferLowThreshold: number = 1;
+
+  /**
+   * event listeners
+   */
+  onSendProgress: Set<onFileTransferProgressCb> = new Set();
+  onRecvProgress: Set<onFileTransferProgressCb> = new Set();
 
   constructor(dc: RTCDataChannel) {
     this._dc = dc;
+    this._dc.bufferedAmountLowThreshold = this._sendBufferLowThreshold;
   }
 
   /**
@@ -129,15 +185,22 @@ export class FileTransfer {
   async sendFile(file: File) {
     this._checkState();
 
-    const fileMeta: FileMeta = { name: file.name, size: file.size };
+    const fileMeta: FileTransferMeta = {
+      name: file.name,
+      size: file.size,
+    };
     const fileData = await readFileAsArrayBuffer(file);
 
-    this._sendInfo = new FileTramsferInfo(fileMeta);
+    this.sendInfo = new FileTramsferInfo(fileMeta);
     this._sendFileMeta(fileMeta);
     this._sendFileData(fileData);
   }
-  private _sendFileMeta(meta: FileMeta) {
-    this._dc.send(JSON.stringify(meta));
+  private _sendFileMeta(meta: FileTransferMeta) {
+    const msg: FileTransferMsg<FileTransferMeta> = {
+      type: FileTransferMsgType.META,
+      data: meta,
+    };
+    this._dc.send(JSON.stringify(msg));
   }
   private _sendFileData(data: ArrayBuffer) {
     try {
@@ -146,43 +209,77 @@ export class FileTransfer {
        *  @ref https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Using_data_channels#concerns_with_large_messages
        */
       const MAX_CHUNK_SIZE = 16 * 1024;
-      const chunkNum = Math.ceil(data.byteLength / MAX_CHUNK_SIZE);
-      for (let i = 0; i < chunkNum; i++) {
-        const start = i * MAX_CHUNK_SIZE;
-        const end = Math.min(start + MAX_CHUNK_SIZE, data.byteLength);
-        const chunk = data.slice(start, end);
-        this._dc.send(chunk);
-      }
+      /**
+       * send too many chunks will cause queue to be full
+       * @ref https://stackoverflow.com/questions/71285807/i-am-trying-to-share-a-file-over-webrtc-but-after-some-time-it-stops-and-log-rt
+       */
+      const queueDataToSend = () => {
+        while (data.byteLength) {
+          // if data in buffer over threshold, refuse to send
+          // until data fall below threshold
+          if (this._dc.bufferedAmount > this._sendBufferLimit) {
+            this._dc.onbufferedamountlow = () => {
+              this._dc.onbufferedamountlow = null;
+              queueDataToSend();
+            };
+            return;
+          }
+          const chunk = data.slice(0, MAX_CHUNK_SIZE);
+          data = data.slice(MAX_CHUNK_SIZE, data.byteLength);
+          this._dc.send(chunk);
+        }
+      };
+      queueDataToSend();
     } catch (e) {
       console.error("send data error", e);
     }
   }
   isSending() {
-    return !!this._sendInfo;
+    return !!this.sendInfo;
   }
 
   /**
    * recv
    */
-  recvFileMeta(meta: FileMeta) {
+  recvFileMeta(meta: FileTransferMeta) {
     this._checkState();
-    this._recvInfo = new FileTramsferInfo(meta);
+    this.recvInfo = new FileTramsferInfo(meta);
   }
   recvFileData(data: ArrayBuffer) {
     this._checkState();
     if (this.isReceiving()) {
-      const blob = this._recvInfo!.appendData(data);
+      const blob = this.recvInfo!.appendData(data);
+
+      const progress = this.recvInfo!.updateRate();
+      if (progress) {
+        // call onRecvProgressCb
+        this.onRecvProgress.forEach((cb) => cb(progress));
+        // then tell progress to the sender
+        const msg: FileTransferMsg<FileTransferProgress> = {
+          type: FileTransferMsgType.PROGRESS,
+          data: progress,
+        };
+        this._dc.send(JSON.stringify(msg));
+      }
+
       if (blob) this._recvFileFinish(blob);
     } else {
       console.error("no file transfer in progress");
     }
   }
+  recvFileProgress(progress: FileTransferProgress) {
+    this._checkState();
+    if (this.isSending()) {
+      // call onSendProgressCb
+      this.onSendProgress.forEach((cb) => cb(progress));
+    }
+  }
   private _recvFileFinish(completeFileData: Blob) {
-    downloadBlob(completeFileData, this._recvInfo!.name);
-    this._recvInfo = null;
+    downloadBlob(completeFileData, this.recvInfo!.name);
+    this.recvInfo = null;
   }
   isReceiving() {
-    return !!this._recvInfo;
+    return !!this.recvInfo;
   }
 
   private _checkState() {
@@ -192,8 +289,8 @@ export class FileTransfer {
   }
   close() {
     this.state = FileTransferState.CLOSED;
-    this._sendInfo = null;
-    this._recvInfo = null;
+    this.sendInfo = null;
+    this.recvInfo = null;
   }
 }
 
@@ -214,12 +311,19 @@ export function setupFileTransfer(
     ft.close();
     console.debug("data channel close", dc);
   };
+  // @FIX may should be placed inside FileTransfer?
   dc.onmessage = (e) => {
     if (typeof e.data === "string") {
-      console.debug("recv file meta", e.data);
+      console.debug("recv msg", e.data);
       // file meta data: JSON string
-      const meta: FileMeta = JSON.parse(e.data);
-      ft.recvFileMeta(meta);
+      const msg: FileTransferMsg<unknown> = JSON.parse(e.data);
+      if (msg.type === FileTransferMsgType.META) {
+        ft.recvFileMeta((msg as FileTransferMsg<FileTransferMeta>).data);
+      } else if (msg.type === FileTransferMsgType.PROGRESS) {
+        ft.recvFileProgress(
+          (msg as FileTransferMsg<FileTransferProgress>).data
+        );
+      }
     } else {
       console.debug("recv file data", e.data);
       // file data: ArrayBuffer
