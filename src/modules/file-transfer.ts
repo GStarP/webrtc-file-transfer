@@ -120,8 +120,9 @@ export class FileTramsferInfo {
   name: string;
   size: number;
   receivedSize: number = 0;
-
   private _buffer: ArrayBuffer[];
+
+  private _rateUpdateInterval: number = 500;
   private _lastRecvTime: number = Date.now();
   private _lastRecvSize: number = 0;
 
@@ -144,8 +145,14 @@ export class FileTramsferInfo {
   updateRate(): FileTransferProgress | undefined {
     const now = Date.now();
     const timeDiff = now - this._lastRecvTime;
-    // @FIX avoid too frequent update
-    if (timeDiff > 200 || this.receivedSize === this.size) {
+    /**
+     * @tips too frequent update is not necessary
+     * and can cause data channel block
+     */
+    if (
+      timeDiff > this._rateUpdateInterval ||
+      this.receivedSize === this.size
+    ) {
       const progress = {
         receivedSize: this.receivedSize,
         rate: ((this.receivedSize - this._lastRecvSize) / timeDiff) * 1000,
@@ -224,9 +231,11 @@ export class FileTransfer {
        *  @ref https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Using_data_channels#concerns_with_large_messages
        */
       const MAX_CHUNK_SIZE = 16 * 1024;
-      // prepare data in form of chunks
-      // slice in `queueDataToSend` will cause time consuming
-      // which slows down transferring rate
+      /**
+       * @tips prepare data in form of chunks
+       * slice in `queueDataToSend` will cause time consuming
+       * which slows down transferring rate
+       */
       const chunkNum = Math.ceil(data.byteLength / MAX_CHUNK_SIZE);
       const chunks = new Array(chunkNum).fill(0);
       for (let i = 0; i < chunkNum; i++) {
@@ -280,11 +289,11 @@ export class FileTransfer {
         // call onRecvProgressCb
         this.onRecvProgress.forEach((cb) => cb(progress));
         // then tell progress to the sender
-        // const msg: FileTransferMsg<FileTransferProgress> = {
-        //   type: FileTransferMsgType.PROGRESS,
-        //   data: progress,
-        // };
-        // this._dc.send(JSON.stringify(msg));
+        const msg: FileTransferMsg<FileTransferProgress> = {
+          type: FileTransferMsgType.PROGRESS,
+          data: progress,
+        };
+        this._dc.send(JSON.stringify(msg));
       }
 
       if (blob) this._recvFileFinish(blob);

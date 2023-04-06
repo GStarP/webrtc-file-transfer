@@ -26,6 +26,6 @@ pnpm dev
 
 - [x] show transferring progress in both sides
 - [x] test with large file (more than 1 GB)
-- [ ] progress bug when transferring large file
+- [x] progress bug when transferring large file
 - [ ] test in LAN
 - [ ] parallel file transferring
