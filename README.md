@@ -27,5 +27,7 @@ pnpm dev
 - [x] show transferring progress in both sides
 - [x] test with large file (more than 1 GB)
 - [x] progress bug when transferring large file
-- [ ] test in LAN
-- [ ] parallel file transferring
+- [ ] test in LAN (solve https certificate issues)
+- [x] parallel file transferring
+
+> Parallel file transferring works, but by the limit of bandwidth, transferring 2 file at the same time is not faster than transferring 1 file. The second file's transferring rate will be pretty low.

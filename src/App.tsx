@@ -1,63 +1,81 @@
 import { useState, ChangeEvent, useRef } from "react";
 import {
-  FileTransfer,
   startFileTransferAsConsumer,
   startFileTransferAsProducer,
+  FileTransferManager,
 } from "./modules/file-transfer";
+import {
+  FileTransferInfo,
+  FileTransferInfoType,
+} from "./modules/file-transfer/task";
+import { downloadBlob } from "./utils";
 
 function App() {
   const [pinToShow, setPinToShow] = useState("no pin");
   const [pinInput, setPinInput] = useState("");
 
-  const [sendPercent, setSendPercent] = useState(0);
-  const [sendRate, setSendRate] = useState(0);
-  const [recvPercent, setRecvPercent] = useState(0);
-  const [recvRate, setRecvRate] = useState(0);
+  const [sendTasks, setSendTasks] = useState<FileTransferInfo[]>([]);
+  const [recvTasks, setRecvTasks] = useState<FileTransferInfo[]>([]);
 
-  const [fileName, setFileName] = useState("no file");
-  const [fileSize, setFileSize] = useState(0);
-  const [fileType, setFileType] = useState("");
-
-  const fileTransfer = useRef<FileTransfer | null>(null);
-
-  function setProgressHandlers(ft: FileTransfer) {
-    ft.onSendProgress.add((progress) => {
-      setSendPercent((progress.receivedSize / ft.sendInfo!.size) * 100);
-      setSendRate(progress.rate / 1000);
-    });
-    ft.onRecvProgress.add((progress) => {
-      setRecvPercent((progress.receivedSize / ft.recvInfo!.size) * 100);
-      setRecvRate(progress.rate / 1000);
-    });
-  }
+  const fileTransferManger = useRef<FileTransferManager | null>(null);
 
   async function startProducer() {
-    startFileTransferAsProducer(
-      (pin) => {
-        setPinToShow(pin + "");
-      },
-      (ft) => {
-        setProgressHandlers(ft);
-        fileTransfer.current = ft;
-      }
+    fileTransferManger.current = startFileTransferAsProducer((pin) => {
+      setPinToShow(pin + "");
+    });
+    setupFTM(fileTransferManger.current);
+  }
+  async function startConsumer() {
+    fileTransferManger.current = startFileTransferAsConsumer(
+      parseInt(pinInput)
     );
+    setupFTM(fileTransferManger.current);
   }
 
-  async function startConsumer() {
-    startFileTransferAsConsumer(parseInt(pinInput), (ft) => {
-      setProgressHandlers(ft);
-      fileTransfer.current = ft;
+  function setupFTM(ftm: FileTransferManager) {
+    ftm.addEventListener("task", (info: FileTransferInfo) => {
+      if (info.type === FileTransferInfoType.SEND) {
+        setSendTasks((tasks) => [...tasks, info]);
+      } else {
+        setRecvTasks((tasks) => [...tasks, info]);
+      }
     });
+
+    ftm.addEventListener("task-progress", (info: FileTransferInfo) => {
+      if (info.type === FileTransferInfoType.SEND) {
+        setSendTasks((tasks) =>
+          tasks.map((task) => {
+            if (task.meta.id === info.meta.id) {
+              return info;
+            }
+            return task;
+          })
+        );
+      } else {
+        setRecvTasks((tasks) =>
+          tasks.map((task) => {
+            if (task.meta.id === info.meta.id) {
+              return info;
+            }
+            return task;
+          })
+        );
+      }
+    });
+
+    ftm.addEventListener(
+      "task-finish",
+      (res: { info: FileTransferInfo; blob: Blob }) => {
+        downloadBlob(res.blob, res.info.meta.name);
+      }
+    );
   }
 
   async function onFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) {
-      setFileName(file.name);
-      setFileSize(file.size);
-      setFileType(file.type);
-      if (fileTransfer.current) {
-        fileTransfer.current.sendFile(file);
+      if (fileTransferManger.current) {
+        fileTransferManger.current.send(file);
       }
     }
   }
@@ -67,8 +85,6 @@ function App() {
       <div style={{ marginBottom: 16 }}>
         <div>{pinToShow}</div>
         <button onClick={() => startProducer()}>Producer</button>
-        <div>Send Percent: {sendPercent.toFixed(2)}%</div>
-        <div>Send Rate: {sendRate.toFixed(2)}KB/s</div>
       </div>
       <div style={{ marginBottom: 16 }}>
         <input
@@ -76,14 +92,48 @@ function App() {
           onChange={(e) => setPinInput(e.target.value)}
         ></input>
         <button onClick={() => startConsumer()}>Consumer</button>
-        <div>Recv Percent: {recvPercent.toFixed(2)}%</div>
-        <div>Recv Rate: {recvRate.toFixed(2)}KB/s</div>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <input type="file" onChange={(e) => onFileChange(e)}></input>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <div>SEND</div>
+        {sendTasks.map((info) => (
+          <FileTransferTask key={info.meta.id} info={info} />
+        ))}
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <div>RECV</div>
+        {recvTasks.map((info) => (
+          <FileTransferTask key={info.meta.id} info={info} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FileTransferTask(props: { info: FileTransferInfo }) {
+  const { info } = props;
+  return (
+    <div
+      style={{
+        padding: 8,
+        border: "1px solid #000",
+      }}
+    >
+      <div>
+        <span style={{ marginRight: 8 }}>ID: {info.meta.id}</span>
+        <span style={{ marginRight: 8 }}>NAME: {info.meta.name}</span>
+        <span style={{ marginRight: 8 }}>SIZE: {info.meta.size}</span>
       </div>
       <div>
-        <div>{fileName}</div>
-        <div>{fileSize} bytes</div>
-        <div>{fileType}</div>
-        <input type="file" onChange={(e) => onFileChange(e)}></input>
+        <span style={{ marginRight: 8 }}>
+          PRCT:
+          {((info.progress.receivedSize / info.meta.size) * 100).toFixed(2)}%
+        </span>
+        <span style={{ marginRight: 8 }}>
+          RATE: {info.progress.rate.toFixed(2)}
+        </span>
       </div>
     </div>
   );
