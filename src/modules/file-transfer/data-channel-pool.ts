@@ -9,7 +9,7 @@ const DEFAULT_DATA_CHANNEL_POOL_PROPS = {
   size: 3,
 };
 
-export type DataChannelPoolEvent = "ready" | "free-message" | "close";
+export type DataChannelPoolEvent = "ready" | "message" | "close";
 
 export class DataChannelPool extends EventEmitter<DataChannelPoolEvent> {
   private _pc: RTCPeerConnection;
@@ -84,15 +84,10 @@ export class DataChannelPool extends EventEmitter<DataChannelPoolEvent> {
       this._free.push(dc.label);
     });
     dc.onmessage = (e) => {
-      if (typeof e.data === "string")
+      if (typeof e.data === "string") {
         console.debug(`dc[${dc.label}].onmessage:`, e.data);
-      /**
-       * @FIX not a good design
-       * only when data channel is free, emit free-message event
-       * can reduce `JSON.parse` cost
-       */
-      if (this._free.indexOf(dc.label) !== -1) {
-        this.emitEvent("free-message", { dc, event: e });
+
+        this.emitEvent("message", { dc, event: e });
       }
     };
   }

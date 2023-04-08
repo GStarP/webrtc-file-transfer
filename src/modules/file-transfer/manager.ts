@@ -5,6 +5,7 @@ import {
   FileTransferInfoType,
   FileTransferMeta,
   FileTransferMsg,
+  FileTransferMsgType,
   FileTransferRecvTask,
   FileTransferSendTask,
 } from "./task";
@@ -36,41 +37,43 @@ export class FileTransferManager extends EventEmitter<FileTransferManagerEvent> 
     });
     /**
      * @FIX not a good design
-     * when free data channel receives message
+     * when data channel receives META message
      * means peer send file, need to recv in local
      */
     this._dataChannelPool.addEventListener(
-      "free-message",
+      "message",
       (e: { dc: RTCDataChannel; event: MessageEvent<any> }) => {
         const { dc, event } = e;
         if (typeof event.data === "string") {
           // meta
           const msg: FileTransferMsg<FileTransferMeta> = JSON.parse(event.data);
-          const meta = msg.data;
-          const id = meta.id;
-          const task = new FileTransferRecvTask(
-            {
-              type: FileTransferInfoType.RECV,
-              meta,
-              progress: {
-                receivedSize: 0,
-                rate: 0,
+          if (msg.type === FileTransferMsgType.META) {
+            const meta = msg.data;
+            const id = meta.id;
+            const task = new FileTransferRecvTask(
+              {
+                type: FileTransferInfoType.RECV,
+                meta,
+                progress: {
+                  receivedSize: 0,
+                  rate: 0,
+                },
               },
-            },
-            dc
-          );
-          this._recvTasks.set(id, task);
+              dc
+            );
+            this._recvTasks.set(id, task);
 
-          task.addEventListener("progress", () => {
-            this.emitEvent("task-progress", this._recvTasks.get(id)!.info);
-          });
-          task.addEventListener("finish", (blob: Blob) => {
-            this._recvTasks.delete(id);
-            this.emitEvent("task-finish", { info: task.info, blob });
-            // no need to `retDataChannel`, only send will call `getDataChannel`
-          });
+            task.addEventListener("progress", () => {
+              this.emitEvent("task-progress", this._recvTasks.get(id)!.info);
+            });
+            task.addEventListener("finish", (blob: Blob) => {
+              this._recvTasks.delete(id);
+              this.emitEvent("task-finish", { info: task.info, blob });
+              // no need to `retDataChannel`, only send will call `getDataChannel`
+            });
 
-          this.emitEvent("task", task.info);
+            this.emitEvent("task", task.info);
+          }
         }
       }
     );
